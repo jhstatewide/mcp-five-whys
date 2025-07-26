@@ -111,9 +111,10 @@ class SessionStore {
 const sessionStore = new SessionStore();
 
 // Create the server instance
+// TODO: Remember to update version number for each release
 export const server = new Server({
   name: "five-whys-mcp-server",
-  version: "1.0.0",
+  version: "1.0.4",
 });
 
 // Handle the list tools request
@@ -122,23 +123,27 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     tools: [
       {
         name: "five_whys",
-        description: "Guide the model through a 5‑Whys root cause analysis. IMPORTANT: On first call, provide only the 'problem' parameter. The tool will automatically create a session and return a sessionId - you MUST use this sessionId in all subsequent calls until the analysis is complete. Continue calling until needsMoreWhys is false.",
+        description: "Guide the model through a 5‑Whys root cause analysis. FIRST CALL: Provide ONLY 'problem' parameter. The tool creates a session and returns a sessionId. SUBSEQUENT CALLS: Use the returned sessionId + 'currentReason' (your answer to the previous why). Continue until analysis is complete.",
         inputSchema: zodToJsonSchema(FiveWhysSchema),
         usageInstructions: `This tool implements the 5-Whys root cause analysis technique. 
 
 USAGE PATTERN:
-1. First call: Provide only 'problem' parameter (tool creates session automatically)
-2. Tool returns sessionId and first 'why' question
-3. Subsequent calls: Provide 'sessionId' and 'currentReason' (your answer to the previous why)
-4. Continue until tool returns needsMoreWhys: false
+1. FIRST CALL: {"problem": "your problem statement"}
+   → Tool creates session and returns sessionId + first why question
+2. SUBSEQUENT CALLS: {"sessionId": "returned_session_id", "currentReason": "your answer"}
+   → Tool asks next why question
+3. CONTINUE until tool returns "ANALYSIS COMPLETE"
 
 EXAMPLE CALLS:
 Call 1: {"problem": "The website is slow"}
 Call 2: {"sessionId": "session_1234567890_abc123", "currentReason": "The server is overloaded"}
 Call 3: {"sessionId": "session_1234567890_abc123", "currentReason": "Too many users are accessing it"}
-...continue until needsMoreWhys: false
+...continue until analysis is complete
 
-IMPORTANT: Do not generate session IDs yourself - the tool will create them automatically. Do not attempt to complete the analysis yourself - let the tool guide you through all 5 iterations.`,
+IMPORTANT: 
+- Do NOT generate session IDs yourself - the tool creates them automatically
+- Do NOT attempt to complete the analysis yourself - let the tool guide you through all iterations
+- The tool will clearly show the sessionId in each response`,
       },
     ],
   };
@@ -179,9 +184,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (parsed.sessionId || parsed.currentReason) {
         throw new McpError(
           ErrorCode.InvalidRequest,
-          `For the first call, provide ONLY the 'problem' parameter.\n\n` +
-          `Expected format: {"problem": "your problem statement"}\n\n` +
-          `Do not provide sessionId or currentReason in the first call - the tool will create the session automatically.`
+          `FIRST CALL ERROR: Provide ONLY the 'problem' parameter.\n\n` +
+          `CORRECT FORMAT: {"problem": "your problem statement"}\n\n` +
+          `DO NOT include sessionId or currentReason in the first call - the tool creates the session automatically.`
         );
       }
       
@@ -203,7 +208,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         content: [
           {
             type: "text",
-            text: `${firstPrompt}\n\nSESSION CREATED: ${sessionId}\n\nIMPORTANT: I've created session ${sessionId} for you. You MUST use this sessionId in all subsequent calls until the analysis is complete.\n\nNext call should be: {"sessionId": "${sessionId}", "currentReason": "your answer to this why question"}`,
+            text: `FIVE WHYS ANALYSIS STARTED\n\n` +
+                  `Problem: "${parsed.problem}"\n\n` +
+                  `Question: ${firstPrompt}\n\n` +
+                  `SESSION ID: ${sessionId}\n\n` +
+                  `NEXT CALL FORMAT:\n` +
+                  `{"sessionId": "${sessionId}", "currentReason": "your answer to this why question"}\n\n` +
+                  `IMPORTANT: You MUST use this sessionId in all subsequent calls until the analysis is complete.`,
           },
         ],
         state: {
@@ -228,15 +239,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       sessionState = existingState;
     }
 
-    // Validate that currentReason is provided for continuing sessions
-    if (sessionId && !parsed.currentReason) {
-      throw new McpError(
-        ErrorCode.InvalidRequest, 
-        `currentReason is required when continuing an existing session. Please provide your answer to the previous 'why' question.\n\n` +
-        `Expected format: {"sessionId": "${sessionId}", "currentReason": "your answer to the previous why question"}\n\n` +
-        `Current session state: Why #${sessionState.whyNumber} for problem: "${sessionState.problem}"`
-      );
-    }
+          // Validate that currentReason is provided for continuing sessions
+      if (sessionId && !parsed.currentReason) {
+        throw new McpError(
+          ErrorCode.InvalidRequest, 
+          `CONTINUATION ERROR: currentReason is required when continuing an existing session.\n\n` +
+          `CORRECT FORMAT: {"sessionId": "${sessionId}", "currentReason": "your answer to the previous why question"}\n\n` +
+          `Current session: Why #${sessionState.whyNumber} for problem: "${sessionState.problem}"`
+        );
+      }
 
     // Append current reason to history if provided
     if (parsed.currentReason) {
@@ -250,9 +261,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (parsed.needsMoreWhys !== undefined) {
       throw new McpError(
         ErrorCode.InvalidRequest,
-        `Do not set the 'needsMoreWhys' parameter - let the tool determine when to continue or stop the analysis.\n\n` +
-        `Expected format: {"sessionId": "${sessionId}", "currentReason": "your answer"}\n\n` +
-        `The tool will automatically determine if more 'why' questions are needed.`
+        `PARAMETER ERROR: Do not set the 'needsMoreWhys' parameter - let the tool determine when to continue or stop.\n\n` +
+        `CORRECT FORMAT: {"sessionId": "${sessionId}", "currentReason": "your answer"}\n\n` +
+        `The tool automatically determines if more 'why' questions are needed.`
       );
     }
 
@@ -277,7 +288,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         content: [
           {
             type: "text",
-            text: `${prompt}\n\nIMPORTANT: You must call this tool again with your answer using sessionId: ${sessionId}. Do not stop here - continue the 5-Whys process until the tool indicates completion.\n\nNext call: {"sessionId": "${sessionId}", "currentReason": "your answer to this why question"}`,
+            text: `WHY #${nextWhyNumber} OF 5\n\n` +
+                  `Problem: "${sessionState.problem}"\n\n` +
+                  `Question: ${prompt}\n\n` +
+                  `SESSION ID: ${sessionId}\n\n` +
+                  `NEXT CALL FORMAT:\n` +
+                  `{"sessionId": "${sessionId}", "currentReason": "your answer to this why question"}\n\n` +
+                  `IMPORTANT: Continue the 5-Whys process until completion.`,
           },
         ],
         // Return session ID for the next call
@@ -309,7 +326,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       content: [
         {
           type: "text",
-          text: summaryLines.join("\n"),
+          text: `FIVE WHYS ANALYSIS COMPLETE\n\n` +
+                summaryLines.join("\n") +
+                `\n\nSESSION ID: ${sessionId}\n` +
+                `ANALYSIS FINISHED - No more calls needed`,
         },
       ],
       state: {
@@ -341,7 +361,7 @@ async function runServer() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   // Avoid using console.log with MCP servers – use stderr instead
-  console.error("Five‑Whys MCP server running over stdio");
+  console.error("Five‑Whys MCP server v1.0.4 running over stdio");
 }
 
 runServer().catch((err) => {
