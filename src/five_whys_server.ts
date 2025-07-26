@@ -114,7 +114,7 @@ const sessionStore = new SessionStore();
 // TODO: Remember to update version number for each release
 export const server = new Server({
   name: "five-whys-mcp-server",
-  version: "1.0.4",
+  version: "1.0.6",
 });
 
 // Handle the list tools request
@@ -123,9 +123,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     tools: [
       {
         name: "five_whys",
-        description: "Guide the model through a 5‑Whys root cause analysis. FIRST CALL: Provide ONLY 'problem' parameter. The tool creates a session and returns a sessionId. SUBSEQUENT CALLS: Use the returned sessionId + 'currentReason' (your answer to the previous why). Continue until analysis is complete.",
+        description: "CRITICAL: You MUST call this tool for each step. Do NOT think through the analysis yourself. FIRST CALL: Provide ONLY 'problem' parameter. The tool creates a session and returns a sessionId. SUBSEQUENT CALLS: Use the returned sessionId + 'currentReason' (your answer to the previous why). Continue until tool says 'ANALYSIS COMPLETE'.",
         inputSchema: zodToJsonSchema(FiveWhysSchema),
         usageInstructions: `This tool implements the 5-Whys root cause analysis technique. 
+
+CRITICAL WARNING: You MUST call this tool for each step. Do NOT think through the analysis yourself.
 
 USAGE PATTERN:
 1. FIRST CALL: {"problem": "your problem statement"}
@@ -134,16 +136,27 @@ USAGE PATTERN:
    → Tool asks next why question
 3. CONTINUE until tool returns "ANALYSIS COMPLETE"
 
-EXAMPLE CALLS:
+EXAMPLE STEP-BY-STEP PROCESS:
 Call 1: {"problem": "The website is slow"}
+  → Tool responds with sessionId and first why question
 Call 2: {"sessionId": "session_1234567890_abc123", "currentReason": "The server is overloaded"}
+  → Tool responds with next why question
 Call 3: {"sessionId": "session_1234567890_abc123", "currentReason": "Too many users are accessing it"}
-...continue until analysis is complete
+  → Tool responds with next why question
+...continue until tool says "ANALYSIS COMPLETE"
 
-IMPORTANT: 
-- Do NOT generate session IDs yourself - the tool creates them automatically
-- Do NOT attempt to complete the analysis yourself - let the tool guide you through all iterations
-- The tool will clearly show the sessionId in each response`,
+WHAT NOT TO DO:
+- Do NOT think through the analysis yourself
+- Do NOT generate session IDs yourself
+- Do NOT attempt to complete the analysis yourself
+- Do NOT provide all 5 answers at once
+- Do NOT skip calling the tool multiple times
+
+WHAT TO DO:
+- Call the tool for EACH why question
+- Use the sessionId returned by the tool
+- Provide ONE answer per call
+- Continue until tool says "ANALYSIS COMPLETE"`,
       },
     ],
   };
@@ -176,7 +189,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ErrorCode.InvalidRequest, 
           `Problem is required to start a new analysis.\n\n` +
           `Expected format: {"problem": "your problem statement"}\n\n` +
-          `Example: {"problem": "The website is slow"}`
+          `Example: {"problem": "The website is slow"}\n\n` +
+          `CRITICAL: Do NOT think through the 5-Whys analysis yourself. You MUST call this tool for each step.`
         );
       }
 
@@ -186,7 +200,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ErrorCode.InvalidRequest,
           `FIRST CALL ERROR: Provide ONLY the 'problem' parameter.\n\n` +
           `CORRECT FORMAT: {"problem": "your problem statement"}\n\n` +
-          `DO NOT include sessionId or currentReason in the first call - the tool creates the session automatically.`
+          `DO NOT include sessionId or currentReason in the first call - the tool creates the session automatically.\n\n` +
+          `CRITICAL: Do NOT think through the 5-Whys analysis yourself. You MUST call this tool for each step.`
         );
       }
       
@@ -214,7 +229,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   `SESSION ID: ${sessionId}\n\n` +
                   `NEXT CALL FORMAT:\n` +
                   `{"sessionId": "${sessionId}", "currentReason": "your answer to this why question"}\n\n` +
-                  `IMPORTANT: You MUST use this sessionId in all subsequent calls until the analysis is complete.`,
+                  `CRITICAL: You MUST call this tool again with your answer. Do NOT think through the analysis yourself.`,
           },
         ],
         state: {
@@ -294,7 +309,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   `SESSION ID: ${sessionId}\n\n` +
                   `NEXT CALL FORMAT:\n` +
                   `{"sessionId": "${sessionId}", "currentReason": "your answer to this why question"}\n\n` +
-                  `IMPORTANT: Continue the 5-Whys process until completion.`,
+                  `CRITICAL: You MUST call this tool again with your answer. Do NOT think through the analysis yourself.`,
           },
         ],
         // Return session ID for the next call
@@ -361,7 +376,7 @@ async function runServer() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   // Avoid using console.log with MCP servers – use stderr instead
-  console.error("Five‑Whys MCP server v1.0.4 running over stdio");
+  console.error("Five‑Whys MCP server v1.0.6 running over stdio");
 }
 
 runServer().catch((err) => {

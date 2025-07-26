@@ -1,6 +1,6 @@
 {
   "name": "@jharding_npm/five-whys-mcp-server",
-  "version": "1.0.4",
+  "version": "1.0.6",
   "description": "A stateful MCP server for 5-Whys root cause analysis",
   "main": "dist/five_whys_server.js",
   "type": "module",
