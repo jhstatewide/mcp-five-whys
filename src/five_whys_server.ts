@@ -31,10 +31,10 @@ const WhyEntrySchema = z.object({
 });
 
 const FiveWhysSchema = z.object({
-  sessionId: z.string().optional(),
-  problem: z.string().min(1).optional(),
-  currentReason: z.string().optional(),
-  needsMoreWhys: z.boolean().optional(),
+  sessionId: z.string().optional().describe("Session ID to maintain state across calls. REQUIRED for all calls after the first one. The tool will automatically create and provide this in the first response - do not generate session IDs yourself."),
+  problem: z.string().min(1).optional().describe("The initial problem statement. REQUIRED only for the first call to start a new analysis."),
+  currentReason: z.string().optional().describe("Your answer to the previous 'why' question. REQUIRED for all calls after the first one."),
+  needsMoreWhys: z.boolean().optional().describe("Whether to continue asking 'why' questions. Let the tool determine this value - do not set this yourself."),
 });
 
 // Session state interface
@@ -122,8 +122,23 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     tools: [
       {
         name: "five_whys",
-        description: "Guide the model through a 5‑Whys root cause analysis. Use sessionId to maintain state across calls.",
+        description: "Guide the model through a 5‑Whys root cause analysis. IMPORTANT: On first call, provide only the 'problem' parameter. The tool will automatically create a session and return a sessionId - you MUST use this sessionId in all subsequent calls until the analysis is complete. Continue calling until needsMoreWhys is false.",
         inputSchema: zodToJsonSchema(FiveWhysSchema),
+        usageInstructions: `This tool implements the 5-Whys root cause analysis technique. 
+
+USAGE PATTERN:
+1. First call: Provide only 'problem' parameter (tool creates session automatically)
+2. Tool returns sessionId and first 'why' question
+3. Subsequent calls: Provide 'sessionId' and 'currentReason' (your answer to the previous why)
+4. Continue until tool returns needsMoreWhys: false
+
+EXAMPLE CALLS:
+Call 1: {"problem": "The website is slow"}
+Call 2: {"sessionId": "session_1234567890_abc123", "currentReason": "The server is overloaded"}
+Call 3: {"sessionId": "session_1234567890_abc123", "currentReason": "Too many users are accessing it"}
+...continue until needsMoreWhys: false
+
+IMPORTANT: Do not generate session IDs yourself - the tool will create them automatically. Do not attempt to complete the analysis yourself - let the tool guide you through all 5 iterations.`,
       },
     ],
   };
@@ -148,12 +163,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     let sessionId = parsed.sessionId;
     let sessionState: SessionState;
 
+    // Handle session management automatically
     if (!sessionId) {
-      // Start a new session
+      // Start a new session - sessionId is optional, we'll create one
       if (!parsed.problem) {
-        throw new McpError(ErrorCode.InvalidRequest, "Problem is required for new sessions");
+        throw new McpError(
+          ErrorCode.InvalidRequest, 
+          `Problem is required to start a new analysis.\n\n` +
+          `Expected format: {"problem": "your problem statement"}\n\n` +
+          `Example: {"problem": "The website is slow"}`
+        );
+      }
+
+      // Validate that LLM is not providing unnecessary parameters for first call
+      if (parsed.sessionId || parsed.currentReason) {
+        throw new McpError(
+          ErrorCode.InvalidRequest,
+          `For the first call, provide ONLY the 'problem' parameter.\n\n` +
+          `Expected format: {"problem": "your problem statement"}\n\n` +
+          `Do not provide sessionId or currentReason in the first call - the tool will create the session automatically.`
+        );
       }
       
+      // Generate a unique session ID
       sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
       sessionState = {
         problem: parsed.problem,
@@ -163,13 +195,47 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         lastActivity: Date.now(),
       };
       sessionStore.set(sessionId, sessionState);
+      
+      // Return session ID with first question
+      const firstPrompt = `Why does the problem "${parsed.problem}" occur?`;
+      
+      return {
+        content: [
+          {
+            type: "text",
+            text: `${firstPrompt}\n\nSESSION CREATED: ${sessionId}\n\nIMPORTANT: I've created session ${sessionId} for you. You MUST use this sessionId in all subsequent calls until the analysis is complete.\n\nNext call should be: {"sessionId": "${sessionId}", "currentReason": "your answer to this why question"}`,
+          },
+        ],
+        state: {
+          sessionId: sessionId,
+          needsMoreWhys: true,
+        },
+      };
     } else {
       // Continue existing session
       const existingState = sessionStore.get(sessionId);
       if (!existingState) {
-        throw new McpError(ErrorCode.InvalidRequest, `Session ${sessionId} not found`);
+        throw new McpError(
+          ErrorCode.InvalidRequest, 
+          `Session ${sessionId} not found. This could be because:\n` +
+          `1. The session has expired (sessions expire after 30 minutes)\n` +
+          `2. The sessionId was mistyped\n` +
+          `3. The session was cleared from memory\n\n` +
+          `Please start a new analysis by providing only the 'problem' parameter:\n` +
+          `{"problem": "your problem statement"}`
+        );
       }
       sessionState = existingState;
+    }
+
+    // Validate that currentReason is provided for continuing sessions
+    if (sessionId && !parsed.currentReason) {
+      throw new McpError(
+        ErrorCode.InvalidRequest, 
+        `currentReason is required when continuing an existing session. Please provide your answer to the previous 'why' question.\n\n` +
+        `Expected format: {"sessionId": "${sessionId}", "currentReason": "your answer to the previous why question"}\n\n` +
+        `Current session state: Why #${sessionState.whyNumber} for problem: "${sessionState.problem}"`
+      );
     }
 
     // Append current reason to history if provided
@@ -180,9 +246,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       });
     }
 
+    // Validate that LLM is not trying to control the flow
+    if (parsed.needsMoreWhys !== undefined) {
+      throw new McpError(
+        ErrorCode.InvalidRequest,
+        `Do not set the 'needsMoreWhys' parameter - let the tool determine when to continue or stop the analysis.\n\n` +
+        `Expected format: {"sessionId": "${sessionId}", "currentReason": "your answer"}\n\n` +
+        `The tool will automatically determine if more 'why' questions are needed.`
+      );
+    }
+
     // Determine whether to continue asking why
     const nextWhyNumber = sessionState.whyNumber + 1;
-    const continueAsking = (parsed.needsMoreWhys !== undefined ? parsed.needsMoreWhys : sessionState.needsMoreWhys) && nextWhyNumber <= 5;
+    const continueAsking = sessionState.needsMoreWhys && nextWhyNumber <= 5;
 
     if (continueAsking) {
       // Prompt the model (or user) for the next why
@@ -201,7 +277,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         content: [
           {
             type: "text",
-            text: prompt,
+            text: `${prompt}\n\nIMPORTANT: You must call this tool again with your answer using sessionId: ${sessionId}. Do not stop here - continue the 5-Whys process until the tool indicates completion.\n\nNext call: {"sessionId": "${sessionId}", "currentReason": "your answer to this why question"}`,
           },
         ],
         // Return session ID for the next call
@@ -243,9 +319,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     };
   } catch (error) {
     if (error instanceof z.ZodError) {
+      const errorDetails = error.errors.map(err => {
+        const field = err.path.join('.');
+        const message = err.message;
+        return `- ${field}: ${message}`;
+      }).join('\n');
+
       throw new McpError(
         ErrorCode.InvalidRequest,
-        `Invalid input: ${JSON.stringify(error.errors)}`
+        `Invalid input format:\n\n${errorDetails}\n\n` +
+        `Expected format for first call: {"problem": "your problem statement"}\n` +
+        `Expected format for subsequent calls: {"sessionId": "session_id", "currentReason": "your answer"}`
       );
     }
     throw error;
