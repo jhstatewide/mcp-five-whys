@@ -1,0 +1,26 @@
+{
+  "name": "five-whys-mcp-server",
+  "version": "1.0.0",
+  "description": "A stateful MCP server for 5-Whys root cause analysis",
+  "main": "dist/five_whys_server.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/five_whys_server.js",
+    "dev": "tsx src/five_whys_server.ts",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^0.4.0",
+    "zod": "^3.22.4",
+    "zod-to-json-schema": "^3.22.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.0",
+    "tsx": "^4.6.0"
+  },
+  "keywords": ["mcp", "five-whys", "root-cause-analysis"],
+  "author": "",
+  "license": "MIT"
+} 
