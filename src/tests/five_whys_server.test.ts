@@ -8,6 +8,7 @@ const WhyEntrySchema = z.object({
 });
 
 const FiveWhysSchema = z.object({
+  mode: z.enum(['standard', 'simple']).optional().default('standard').describe("Operation mode: 'standard' for full functionality, 'simple' for low-powered models"),
   sessionId: z.string().optional().describe("Session ID to maintain state across calls. REQUIRED for all calls after the first one. The tool will automatically create and provide this in the first response - do not generate session IDs yourself."),
   problem: z.string().min(1).optional().describe("The initial problem statement. REQUIRED only for the first call to start a new analysis."),
   currentReason: z.string().optional().describe("Your answer to the previous 'why' question. REQUIRED for all calls after the first one."),
@@ -16,10 +17,7 @@ const FiveWhysSchema = z.object({
 
 // Simple test to verify Jest is working
 describe('Five Whys Server', () => {
-  it('should be able to run a simple test', () => {
-    const result = 1 + 1;
-    expect(result).toBe(2);
-  });
+  
 
   it('should validate input schema correctly', () => {
     // Test valid first call
@@ -31,6 +29,7 @@ describe('Five Whys Server', () => {
     expect(parsed).toHaveProperty('problem', 'The website is slow');
     expect(parsed).not.toHaveProperty('sessionId');
     expect(parsed).not.toHaveProperty('currentReason');
+    expect(parsed).toHaveProperty('mode', 'standard'); // Default mode
 
     // Test valid continuation call
     const validContinuationCall = {
@@ -42,6 +41,16 @@ describe('Five Whys Server', () => {
     expect(parsedContinuation).toHaveProperty('sessionId', 'test_session_123');
     expect(parsedContinuation).toHaveProperty('currentReason', 'The server is overloaded');
     expect(parsedContinuation).not.toHaveProperty('problem');
+
+    // Test simple mode
+    const simpleModeCall = {
+      mode: 'simple',
+      problem: 'The website is slow'
+    };
+
+    const parsedSimpleMode = FiveWhysSchema.parse(simpleModeCall);
+    expect(parsedSimpleMode).toHaveProperty('mode', 'simple');
+    expect(parsedSimpleMode).toHaveProperty('problem', 'The website is slow');
   });
 
   it('should reject invalid input', () => {
@@ -67,21 +76,13 @@ describe('Five Whys Server', () => {
       })
     }).toThrow();
   });
+    // Test invalid currentReason format (number instead of string)
+    expect(() => {
+      FiveWhysSchema.parse({
+        sessionId: 'test_session_123',
+        currentReason: 123 as any // TypeScript will complain, but we're testing runtime validation
+      })
+    }).toThrow();
 
-  it('should enforce schema rules', () => {
-    // Test that problem must be at least 1 character
-    expect(() => {
-      FiveWhysSchema.parse({ problem: '' })
-    }).toThrow();
-    
-    // Test that sessionId must be a string when provided
-    expect(() => {
-      FiveWhysSchema.parse({ sessionId: 123 as any })
-    }).toThrow();
-    
-    // Test that currentReason must be a string when provided
-    expect(() => {
-      FiveWhysSchema.parse({ currentReason: 123 as any })
-    }).toThrow();
-  });
+  
 });

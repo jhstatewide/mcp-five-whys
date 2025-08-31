@@ -31,6 +31,7 @@ const WhyEntrySchema = z.object({
 });
 
 const FiveWhysSchema = z.object({
+  mode: z.enum(['standard', 'simple']).optional().default('standard').describe("Operation mode: 'standard' for full functionality, 'simple' for low-powered models"),
   sessionId: z.string().optional().describe("Session ID to maintain state across calls. REQUIRED for all calls after the first one. The tool will automatically create and provide this in the first response - do not generate session IDs yourself."),
   problem: z.string().min(1).optional().describe("The initial problem statement. REQUIRED only for the first call to start a new analysis."),
   currentReason: z.string().optional().describe("Your answer to the previous 'why' question. REQUIRED for all calls after the first one."),
@@ -44,6 +45,7 @@ interface SessionState {
   history: Array<{ whyNumber: number; answer: string }>;
   needsMoreWhys: boolean;
   lastActivity: number;
+  mode: 'standard' | 'simple';
 }
 
 // In-memory session store with cleanup
@@ -123,26 +125,38 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     tools: [
       {
         name: "five_whys",
-        description: "CRITICAL: You MUST call this tool for each step. Do NOT think through the analysis yourself. FIRST CALL: Provide ONLY 'problem' parameter. The tool creates a session and returns a sessionId. SUBSEQUENT CALLS: Use the returned sessionId + 'currentReason' (your answer to the previous why). Continue until tool says 'ANALYSIS COMPLETE'.",
+        description: "CRITICAL: You MUST call this tool for each step. Do NOT think through the analysis yourself. FIRST CALL: Provide ONLY 'problem' parameter. The tool creates a session and returns a sessionId. SUBSEQUENT CALLS: Use the returned sessionId + 'currentReason' (your answer to the previous why). Continue until tool says 'ANALYSIS COMPLETE'. Use 'mode': 'simple' for low-powered models.",
         inputSchema: zodToJsonSchema(FiveWhysSchema),
         usageInstructions: `This tool implements the 5-Whys root cause analysis technique. 
 
 CRITICAL WARNING: You MUST call this tool for each step. Do NOT think through the analysis yourself.
 
+MODES:
+- Standard mode (default): Full verbose prompts and detailed instructions
+- Simple mode: Shorter prompts and simpler format for low-powered models
+  Use: {"mode": "simple", "problem": "your problem statement"}
+
 USAGE PATTERN:
-1. FIRST CALL: {"problem": "your problem statement"}
+1. FIRST CALL: {"problem": "your problem statement"} or {"mode": "simple", "problem": "your problem statement"}
    → Tool creates session and returns sessionId + first why question
 2. SUBSEQUENT CALLS: {"sessionId": "returned_session_id", "currentReason": "your answer"}
    → Tool asks next why question
 3. CONTINUE until tool returns "ANALYSIS COMPLETE"
 
-EXAMPLE STEP-BY-STEP PROCESS:
+EXAMPLE STEP-BY-STEP PROCESS (Standard Mode):
 Call 1: {"problem": "The website is slow"}
   → Tool responds with sessionId and first why question
 Call 2: {"sessionId": "session_1234567890_abc123", "currentReason": "The server is overloaded"}
   → Tool responds with next why question
 Call 3: {"sessionId": "session_1234567890_abc123", "currentReason": "Too many users are accessing it"}
   → Tool responds with next why question
+...continue until tool says "ANALYSIS COMPLETE"
+
+EXAMPLE STEP-BY-STEP PROCESS (Simple Mode):
+Call 1: {"mode": "simple", "problem": "The website is slow"}
+  → Tool responds with sessionId and simple why question
+Call 2: {"sessionId": "session_1234567890_abc123", "currentReason": "The server is overloaded"}
+  → Tool responds with next simple why question
 ...continue until tool says "ANALYSIS COMPLETE"
 
 WHAT NOT TO DO:
@@ -168,11 +182,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
 
     if (!args) {
-      throw new McpError(ErrorCode.InvalidRequest, "Arguments are required");
+      throw new McpError(ErrorCode.InvalidRequest, "Arguments are required. Please provide the required parameters for the five_whys tool. For the first call, provide only the 'problem' parameter. For subsequent calls, provide the 'sessionId' and 'currentReason' parameters.");
     }
 
     if (name !== "five_whys") {
-      throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
+      throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}. Available tools: five_whys`);
     }
 
     // Validate and parse input using zod
@@ -213,23 +227,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         history: [],
         needsMoreWhys: true,
         lastActivity: Date.now(),
+        mode: parsed.mode || 'standard',
       };
       sessionStore.set(sessionId, sessionState);
       
       // Return session ID with first question
       const firstPrompt = `Why does the problem "${parsed.problem}" occur?`;
       
+      // Generate response based on mode
+      let responseText: string;
+      if (sessionState.mode === 'simple') {
+        responseText = `Problem: ${parsed.problem}\n\n` +
+                      `Why? (Answer with just the reason)\n` +
+                      `Example: "The server response time is slow"\n\n` +
+                      `SESSION ID: ${sessionId}`;
+      } else {
+        responseText = `FIVE WHYS ANALYSIS STARTED\n\n` +
+                      `Problem: "${parsed.problem}"\n\n` +
+                      `Question: ${firstPrompt}\n\n` +
+                      `SESSION ID: ${sessionId}\n\n` +
+                      `NEXT CALL FORMAT:\n` +
+                      `{"sessionId": "${sessionId}", "currentReason": "your answer to this why question"}\n\n` +
+                      `CRITICAL: You MUST call this tool again with your answer. Do NOT think through the analysis yourself.`;
+      }
+      
       return {
         content: [
           {
             type: "text",
-            text: `FIVE WHYS ANALYSIS STARTED\n\n` +
-                  `Problem: "${parsed.problem}"\n\n` +
-                  `Question: ${firstPrompt}\n\n` +
-                  `SESSION ID: ${sessionId}\n\n` +
-                  `NEXT CALL FORMAT:\n` +
-                  `{"sessionId": "${sessionId}", "currentReason": "your answer to this why question"}\n\n` +
-                  `CRITICAL: You MUST call this tool again with your answer. Do NOT think through the analysis yourself.`,
+            text: responseText,
           },
         ],
         state: {
@@ -299,17 +325,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       sessionState.needsMoreWhys = true;
       sessionStore.set(sessionId, sessionState);
 
+      // Generate response based on mode
+      let responseText: string;
+      if (sessionState.mode === 'simple') {
+        responseText = `Problem: ${sessionState.problem}\n` +
+                      `Why #${nextWhyNumber}? (Answer with just the reason)\n` +
+                      `Previous answer: ${lastReason}\n\n` +
+                      `SESSION ID: ${sessionId}`;
+      } else {
+        responseText = `WHY #${nextWhyNumber} OF 5\n\n` +
+                      `Problem: "${sessionState.problem}"\n\n` +
+                      `Question: ${prompt}\n\n` +
+                      `SESSION ID: ${sessionId}\n\n` +
+                      `NEXT CALL FORMAT:\n` +
+                      `{"sessionId": "${sessionId}", "currentReason": "your answer to this why question"}\n\n` +
+                      `CRITICAL: You MUST call this tool again with your answer. Do NOT think through the analysis yourself.`;
+      }
+
       return {
         content: [
           {
             type: "text",
-            text: `WHY #${nextWhyNumber} OF 5\n\n` +
-                  `Problem: "${sessionState.problem}"\n\n` +
-                  `Question: ${prompt}\n\n` +
-                  `SESSION ID: ${sessionId}\n\n` +
-                  `NEXT CALL FORMAT:\n` +
-                  `{"sessionId": "${sessionId}", "currentReason": "your answer to this why question"}\n\n` +
-                  `CRITICAL: You MUST call this tool again with your answer. Do NOT think through the analysis yourself.`,
+            text: responseText,
           },
         ],
         // Return session ID for the next call
@@ -337,14 +374,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     sessionState.needsMoreWhys = false;
     sessionStore.set(sessionId, sessionState);
 
+    // Generate response based on mode
+    let responseText: string;
+    if (sessionState.mode === 'simple') {
+      responseText = `ANALYSIS COMPLETE\n\n` +
+                    summaryLines.join("\n") +
+                    `\n\nSESSION ID: ${sessionId}\n` +
+                    `Analysis finished - no more calls needed`;
+    } else {
+      responseText = `FIVE WHYS ANALYSIS COMPLETE\n\n` +
+                    summaryLines.join("\n") +
+                    `\n\nSESSION ID: ${sessionId}\n` +
+                    `ANALYSIS FINISHED - No more calls needed`;
+    }
+
     return {
       content: [
         {
           type: "text",
-          text: `FIVE WHYS ANALYSIS COMPLETE\n\n` +
-                summaryLines.join("\n") +
-                `\n\nSESSION ID: ${sessionId}\n` +
-                `ANALYSIS FINISHED - No more calls needed`,
+          text: responseText,
         },
       ],
       state: {
